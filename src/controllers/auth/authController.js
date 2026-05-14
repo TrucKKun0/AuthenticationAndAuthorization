@@ -4,11 +4,23 @@ const {sendEmail} = require("../../lib/email");
 const User = require("../../models/userModel");
 const {registerSchema,loginSchema} = require("./authSchema");
 const crypto = require("crypto");
+const {OAuth2Client} = require("google-auth-library");
 
 const jwt = require("jsonwebtoken");
 
 function getAppUrl() {
   return process.env.APP_URL || `http://localhost:${process.env.PORT}`;
+}
+
+function getGoogleClient(){
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = process.env.GOOGLE_CALLBACK_URL;
+if(!clientId || !clientSecret || !redirectUri){
+  throw new Error("Google client credentials are not set in environment variables");  
+
+}
+return new OAuth2Client(clientId,clientSecret,redirectUri);
 }
 
 const registerHandler = async (req, res) => {
@@ -333,6 +345,108 @@ const resetPasswordHandler = async (req,res)=>{
   }
 }
 
+const googleAuthStartHandler = async (req,res)=>{
+  try{
+
+    const client = getGoogleClient();
+    const url = client.generateAuthUrl({
+      access_type : "offline",
+      prompt : "consent",
+      scope : ["openid","profile","email"]
+    })
+    return res.redirect(url);
+
+  }catch(error){
+    console.log(error);
+    return res.status(500).json({
+      success : false,
+      message : "Internal Server Error"
+    })
+  }
+}
+const googleAuthCallbackHandler = async (req,res)=>{
+  const code = req.query.code || undefined;
+  if(!code){
+    return res.status(400).json({
+      success : false,
+      message : "Missing code from Google"
+    });
+  }
+  try{
+    const client = getGoogleClient();
+    const {tokens} = await client.getToken(code);
+    if(!tokens.id_token){
+      return res.status(400).json({
+        success : false,
+        message : "Google did not return an id token"
+      })
+    }
+
+    //verify the id token and get user info from it
+    const ticket = await client.verifyToken({
+      idToken : tokens.id_token,
+      audience : process.env.GOOGLE_CLIENT_ID
+    })
+    const payload = ticket.getPayload();
+    const email = payload.email;
+    const emailVerified = payload.email_verified;
+    if(!email || !emailVerified){
+      return res.status(400).json({
+        success : false,
+        message : "Google account does not have a verified email"
+      })
+    }
+    const normailzedEmail = email.toLowerCase().trim();
+    let user = await User.findOne({email : normailzedEmail});
+    if(!user){
+      const randomPassword = crypto.randomBytes(16).toString("hex");
+      const passwordHash = await hashPassword(randomPassword);
+      user = await User.create({
+        email : normailzedEmail,
+        passwordHash,
+        isEmailVerified : true,
+        twoFactorEnabled : false,
+        name : payload.name || "No Name",
+        role : "user"
+      });
+
+      const accessToken = createAccessToken(user._id,user.role,user.tokenVersion);
+      const refreshToken = createRefreshToken(user._id,user.tokenVersion);
+      const isProd = process.env.NODE_ENV || "production";
+        res.cookie("refreshToken", refreshToken,{
+            httpOnly:true,
+            secure : isProd,
+            sameSite : "lax",
+            maxAge : 7 * 24 * 60 * 60 * 100
+        });
+
+        return res.status(200).json({
+            success : true,
+            accessToken,
+            user:{
+                id : user._id,
+                email : user.email,
+                role : user.role,
+                isEmailVerified : user.isEmailVerified,
+            },
+            message : "Logged in with Google successfully"
+        });
+
+    }else{
+      if(!user.isEmailVerified){
+        user.isEmailVerified = true;
+        await user.save();
+      }
+    }
+
+  }catch(error){
+    console.log(error);
+    return res.status(500).json({
+      success : false,
+      message : "Internal Server Error"
+    })
+  }
+}
 
 module.exports = {
   registerHandler,
@@ -341,5 +455,7 @@ module.exports = {
   refreshHandler,
   logoutHandler,
   forgetPasswordHandler,
-  resetPasswordHandler
+  resetPasswordHandler,
+  googleAuthStartHandler,
+  googleAuthCallbackHandler
 };

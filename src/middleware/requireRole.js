@@ -19,3 +19,5 @@ const requireRole = (role)=>{
         next();
     }
 }
+
+module.exports = requireRole;

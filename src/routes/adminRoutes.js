@@ -4,7 +4,7 @@ const router = express.Router();
 const requireRole = require('../middleware/requireRole');
 const requireAuth = require('../middleware/requireAuth');
 
-router.get('/users',requireAuth,requireRole('admin'),(req,res)=>{
+router.get('/users',requireAuth,requireRole('admin'),async (req,res)=>{
     try{
     const users = await User.find(
         {},
