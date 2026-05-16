@@ -5,6 +5,7 @@ const User = require("../../models/userModel");
 const {registerSchema,loginSchema} = require("./authSchema");
 const crypto = require("crypto");
 const {OAuth2Client} = require("google-auth-library");
+const {authenticator} = require("otplib");
 
 const jwt = require("jsonwebtoken");
 
@@ -167,6 +168,30 @@ const loginHandler = async (req, res) => {
                 success : false,
                 message : "Please verify your email before logging in."
             })
+        }
+        if(user.twoFactorEnabled){
+          if(!twoFactorCode ){
+            return res.status(400).json({
+              success : false,
+              message : "Two factor code is required"
+            });
+          }
+          if(!user.twoFactorSecret){
+            return res.status(500).json({
+              success : false,
+              message : "Two factor is not properly set up for this user. Please contact support."
+            })
+          }
+          //verify the two factor code using otplib
+           const isValid = authenticator.check(twoFactorCode,user.twoFactorSecret);
+           if(!isValid){
+            return res.status(400).json({
+              success : false,
+              message : "Invalid two factor code"
+            })
+           }
+           
+
         }
         const accessToken = createAccessToken(user._id,user.role,user.tokenVersion);
 
@@ -383,7 +408,7 @@ const googleAuthCallbackHandler = async (req,res)=>{
     }
 
     //verify the id token and get user info from it
-    const ticket = await client.verifyToken({
+    const ticket = await client.verifyIdToken({
       idToken : tokens.id_token,
       audience : process.env.GOOGLE_CLIENT_ID
     })
@@ -447,6 +472,98 @@ const googleAuthCallbackHandler = async (req,res)=>{
     })
   }
 }
+const twoFASetupHandler = async (req,res)=>{
+  const authRequest = req;
+  const authUser = authRequest.user;
+  if(!authUser){
+    return res.status(401).json({
+      success : false,
+      message : "Unauthorized"
+    })
+  }
+  try{
+    const user = await User.findById(authUser.id);
+    if(!user){
+      return res.status(404).json({
+        success : false,
+        message : "User not found"
+      });
+    }
+    const secret = authenticator.generateSecret();
+    const issuer = "Node Auth App";
+    const otpAuthUrl = authenticator.keyuri(user.email,issuer,secret);
+
+    user.twoFactorSecret = secret;
+    user.twoFactorEnabled = false;
+    await user.save();
+    return res.status(200).json({
+      success : true,
+      secret,
+      otpAuthUrl,
+      message : "Two factor authentication is set up successfully. Please use the OTP auth URL to set up your authenticator app."
+    })
+
+
+  }catch(error){
+    console.log(error);
+    return res.status(500).json({
+      success : false,
+      message : "Internal Server Error"
+    })
+  }
+}
+const twoFAVerifyHandler = async (req,res)=>{
+  const authRequest = req;
+  const authUser = authRequest.user;
+  if(!authUser){
+    return res.status(401).json({
+      success : false,
+      message : "Unauthorized"
+    })
+  }
+  const {code}  = req.body;
+  if(!code){
+    return res.status(400).json({
+      success : false,
+      message : "Two-factor code is required"
+    })
+  }
+  try{
+    let user = await User.findById(authUser.id);
+    if(!user){
+      return res.status(404).json({
+        success : false,
+        message : "User not found"
+      });
+    }
+    if(!user.twoFactorEnabled || !user.twoFactorSecret){
+      return res.status(400).json({
+        success : false,
+        message : "Two-factor authentication is not set up for this user"
+      })
+    }
+    const isValid = authenticator.check(code,user.twoFactorSecret);
+    if(!isValid){
+      return res.status(400).json({
+        success : false,
+        message : "Invalid two-factor code"
+      })
+    }
+    user.twoFactorEnabled = true;
+    await user.save();
+    return res.status(200).json({
+      success : true,
+      message : "Two-factor authentication is enabled successfully"
+    })
+
+  }catch(error){
+    console.log(error);
+    return res.status(500).json({
+      success : false,
+      message : "Internal Server Error"
+    })
+  }
+}
 
 module.exports = {
   registerHandler,
@@ -457,5 +574,7 @@ module.exports = {
   forgetPasswordHandler,
   resetPasswordHandler,
   googleAuthStartHandler,
-  googleAuthCallbackHandler
+  googleAuthCallbackHandler,
+  twoFASetupHandler,
+  twoFAVerifyHandler
 };
